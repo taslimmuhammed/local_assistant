@@ -6,15 +6,11 @@ import com.local.assistant.context.ChatController
 import com.local.assistant.context.PromptAssembler
 import com.local.assistant.context.Summarizer
 import com.local.assistant.data.AppSettings
-import com.local.assistant.data.AssistantDatabase
 import com.local.assistant.download.ModelDownloadManager
 import com.local.assistant.download.ModelDownloader
 import com.local.assistant.llm.LlmEngine
 import com.local.assistant.voice.TranscriptionSource
 import com.local.assistant.voice.UnavailableTranscriptionSource
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.Dispatchers
 import java.io.File
 
 /**
@@ -27,10 +23,7 @@ import java.io.File
  */
 class AppContainer(context: Context) {
 
-    val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-
     val settings = AppSettings(context)
-    val database = AssistantDatabase(context)
     val downloader = ModelDownloader(context)
     val downloadManager = ModelDownloadManager(context)
 
@@ -46,9 +39,7 @@ class AppContainer(context: Context) {
 
     val chatController = ChatController(
         engine = engine,
-        db = database,
         promptAssembler = promptAssembler,
         summarizer = summarizer,
-        scope = appScope,
     )
 }

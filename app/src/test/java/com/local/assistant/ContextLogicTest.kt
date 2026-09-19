@@ -2,9 +2,7 @@ package com.local.assistant
 
 import com.local.assistant.context.ContextBudget
 import com.local.assistant.context.StreamAccumulator
-import com.local.assistant.data.FtsQuery
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -86,46 +84,5 @@ class StreamAccumulatorTest {
         val acc = StreamAccumulator()
         assertEquals("", acc.consume(""))
         assertEquals("", acc.text())
-    }
-}
-
-class FtsQueryTest {
-
-    @Test
-    fun `terms are quoted and OR-ed`() {
-        assertEquals("\"italian\" OR \"place\"", FtsQuery.build("italian place"))
-    }
-
-    @Test
-    fun `operator characters cannot escape into query syntax`() {
-        // Unquoted, each of these would be parsed by FTS5 rather than matched.
-        val query = FtsQuery.build("""NEAR("a" b) AND c* -d OR: ^e""")
-        assertTrue(query!!.startsWith("\""))
-        assertTrue(query.none { it == '*' || it == '(' || it == '^' })
-    }
-
-    @Test
-    fun `apostrophes and hyphens in ordinary words are handled`() {
-        val query = FtsQuery.build("don't use well-known phrases")
-        assertEquals("\"don\" OR \"use\" OR \"well\" OR \"known\" OR \"phrases\"", query)
-    }
-
-    @Test
-    fun `single characters and punctuation-only input produce no query`() {
-        assertNull(FtsQuery.build("a b c"))
-        assertNull(FtsQuery.build("!!! ???"))
-        assertNull(FtsQuery.build(""))
-    }
-
-    @Test
-    fun `very long input is capped`() {
-        val query = FtsQuery.build((1..50).joinToString(" ") { "word$it" })!!
-        assertEquals(12, query.split(" OR ").size)
-    }
-
-    @Test
-    fun `non-latin scripts survive tokenisation`() {
-        val query = FtsQuery.build("കൊച്ചി യാത്ര")
-        assertTrue(query!!.contains("കൊച"))
     }
 }

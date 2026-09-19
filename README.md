@@ -1,10 +1,11 @@
 # Local Assistant
 
-A chat app that runs entirely on-device. Gemma 4 E4B via LiteRT-LM, chat history
-you can return to, and a context window that never runs out.
+A chat app that runs entirely on-device. Gemma 4 E4B via LiteRT-LM, and a context
+window that never runs out.
 
-There is deliberately no cross-chat memory: the assistant remembers the
-conversation you are in, including its summarised earlier turns, and nothing more.
+Nothing about a conversation is written to disk. The transcript and its running
+summary live in memory for as long as the app does, and are gone when it closes:
+no database, no history, no search, no memory across chats.
 
 Network access is used for exactly one thing: downloading the model. Inference,
 conversations and memory never leave the phone.
@@ -29,11 +30,11 @@ adb push gemma-4-E4B-it-gpu.litertlm /sdcard/Android/data/com.local.assistant/fi
 |---|---|
 | `llm/` | LiteRT-LM engine wrapper, backend selection, memory tools |
 | `context/` | Calibration probe, budgets, compaction, the conversation orchestrator |
-| `data/` | SQLite + FTS5 search, settings |
+| `data/` | In-memory message model, app settings |
 | `download/` | Resumable model download as foreground work |
 | `ui/` | Compose screens |
 
-## The two things this app is actually about
+## The thing this app is actually about
 
 ### It does not run out of context
 
@@ -66,36 +67,12 @@ short-lived conversation so it never occupies the chat's cache. The prompt order
 is a separate concern: it preserves prefix reuse, which saves re-prefill time
 rather than cache bytes.
 
-### Chats behave the way you expect
-
-Opening the app starts a new chat. Earlier ones live in the drawer, grouped by age,
-and reopening one restores its full transcript along with its running summary, so
-you can carry on mid-thread days later.
-
-A chat is named after the first thing you said in it, derived rather than
-model-generated: a title is worth close to nothing and a generation would cost a
-second of GPU on every new conversation. Rename or delete from a long-press.
-
-Empty chats never reach the history. Launching the app and closing it again reuses
-the unused chat rather than stacking blank rows, which is also why
-`isSessionEmpty` decides whether `start()` creates a session or adopts one.
-
-Every message is indexed into FTS5, so the drawer's search box finds a line across
-all chats, BM25-ranked, and opens the chat it came from. Deleting a chat drops its
-messages and its index rows together.
-
 ## Decisions that differ from the obvious choice
 
-**No Room, no Hilt, no KSP.** LiteRT-LM 0.17.1 ships classes with Kotlin metadata
-version 2.4.0, so the project must compile on Kotlin 2.4. No KSP release targets
-2.4 yet (latest is built against 2.3.20), and both Room and Hilt need it. Plain
-SQLite and a hand-wired `AppContainer` cost less than working around that.
-
-**Bundled SQLite, not the platform's.** Android's SQLite is compiled *without*
-FTS5 — `CREATE VIRTUAL TABLE ... USING fts5` fails with "no such module: fts5" even
-on API 36. Verified on an emulator, see `Fts5ProbeTest`. So the app ships
-`androidx.sqlite:sqlite-bundled` (SQLite 3.50.1), which also means identical SQLite
-behaviour on every device instead of whatever the OEM built.
+**No Hilt, no KSP.** LiteRT-LM 0.17.1 ships classes with Kotlin metadata version
+2.4.0, so the project must compile on Kotlin 2.4. No KSP release targets 2.4 yet
+(latest is built against 2.3.20), and Hilt needs it. A hand-wired `AppContainer`
+costs less than working around that.
 
 **Requested window of 16k, capped at 32k.** The Gemma 4 E4B bundle is documented at
 32k. Memory is not what limits this: the model uses grouped-query attention with 2
@@ -129,8 +106,8 @@ audio input: a model that hears the microphone directly gives you nothing to rev
 ## Tests
 
 ```bash
-./gradlew testDebugUnitTest          # 23 tests, no device needed
-./gradlew connectedDebugAndroidTest  # 25 tests, needs a device or emulator
+./gradlew testDebugUnitTest          # 8 tests, no device needed
+./gradlew connectedDebugAndroidTest  # the soak test, needs a device and the model
 ```
 
 The soak test is skipped unless the model file is present on the device:
@@ -142,7 +119,12 @@ The soak test is skipped unless the model file is present on the device:
 
 ## Not here on purpose
 
-No cross-chat memory, no learned user profile, no reminders or calendar. The app
-is a chat client over a local model. If persistent memory comes back, the pieces
-it would build on — FTS5 over every message, per-chat summarisation, the tool
-plumbing in `LlmEngine.createConversation` — are already in place.
+No chat storage, no history, no search, no memory across chats, no reminders. The
+app is a chat client over a local model and forgets everything on exit.
+
+**One exception, and it is deliberate:** app *settings* are still stored, through
+DataStore. That is which model was downloaded, CPU or GPU, the requested window,
+and the measured context ceiling. Dropping those would mean re-running the
+calibration probe on every launch and losing track of the 3 GB file on disk. None
+of it is conversation data. Delete `data/AppSettings.kt` and its call sites if you
+want the app to hold nothing at all between launches.

@@ -9,13 +9,9 @@ import com.local.assistant.context.ChatController
 import com.local.assistant.context.PromptAssembler
 import com.local.assistant.context.Summarizer
 import com.local.assistant.context.TurnEvent
-import com.local.assistant.data.AssistantDatabase
 import com.local.assistant.download.ModelCatalog
 import com.local.assistant.download.ModelDownloader
 import com.local.assistant.llm.LlmEngine
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -46,11 +42,8 @@ import java.io.File
 @LargeTest
 class ContextSoakTest {
 
-    private lateinit var db: AssistantDatabase
     private lateinit var engine: LlmEngine
     private lateinit var controller: ChatController
-    private lateinit var dbName: String
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     @Before
     fun setUp() = runBlocking {
@@ -63,10 +56,6 @@ class ContextSoakTest {
             downloader.fileFor(spec).exists()
         )
 
-        dbName = "soak-${System.nanoTime()}.db"
-        context.getDatabasePath(dbName).delete()
-        db = AssistantDatabase(context, dbName)
-
         engine = LlmEngine()
         val started = engine.initialize(
             modelFile = downloader.fileFor(spec),
@@ -77,10 +66,8 @@ class ContextSoakTest {
 
         controller = ChatController(
             engine = engine,
-            db = db,
             promptAssembler = PromptAssembler(),
             summarizer = Summarizer(engine),
-            scope = scope,
         )
 
         val calibration = CalibrationProbe(engine).run(requestedMax = 8192)
@@ -92,11 +79,6 @@ class ContextSoakTest {
     fun tearDown() {
         if (::controller.isInitialized) controller.close()
         if (::engine.isInitialized) engine.close()
-        if (::db.isInitialized) db.close()
-        if (::dbName.isInitialized) {
-            InstrumentationRegistry.getInstrumentation().targetContext
-                .getDatabasePath(dbName).delete()
-        }
     }
 
     @Test

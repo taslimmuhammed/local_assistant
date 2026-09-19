@@ -23,18 +23,15 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -45,7 +42,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
@@ -53,14 +49,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.local.assistant.context.ContextState
 import com.local.assistant.data.Speaker
 import com.local.assistant.ui.theme.Palette
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalComposeUiApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -72,42 +66,13 @@ fun ChatScreen(
     val rows by viewModel.rows.collectAsStateWithLifecycle()
     val generating by viewModel.isGenerating.collectAsStateWithLifecycle()
     val context by viewModel.contextState.collectAsStateWithLifecycle()
-    val sessions by viewModel.sessions.collectAsStateWithLifecycle()
-    val activeSessionId by viewModel.activeSessionId.collectAsStateWithLifecycle()
-    val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
-    val searchResults by viewModel.searchResults.collectAsStateWithLifecycle()
 
     var draft by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
-
     LaunchedEffect(rows.size, generating) {
         if (rows.isNotEmpty()) listState.animateScrollToItem(rows.lastIndex)
     }
 
-    fun closeDrawer() = scope.launch { drawerState.close() }
-
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        // Swiping open mid-generation is fine; swiping while typing is not, so the
-        // gesture is only live when the drawer is already showing.
-        gesturesEnabled = drawerState.isOpen,
-        drawerContent = {
-            ChatHistoryDrawer(
-                sessions = sessions,
-                activeSessionId = activeSessionId,
-                onNewChat = { viewModel.newSession(); viewModel.clearSearch(); closeDrawer() },
-                onOpenChat = { viewModel.openSession(it); viewModel.clearSearch(); closeDrawer() },
-                onDeleteChat = viewModel::deleteSession,
-                onRenameChat = viewModel::renameSession,
-                onOpenSettings = { closeDrawer(); onOpenSettings() },
-                searchQuery = searchQuery,
-                searchResults = searchResults,
-                onSearch = viewModel::search,
-            )
-        },
-    ) {
     Scaffold(
         containerColor = Palette.White,
         topBar = {
@@ -115,22 +80,17 @@ fun ChatScreen(
                 TopAppBar(
                     title = {
                         Text(
-                            sessions.firstOrNull { it.id == activeSessionId }?.title
-                                ?: "New chat",
+                            "Assistant",
                             style = MaterialTheme.typography.titleMedium,
                             color = Palette.TextPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
                         )
                     },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(Icons.Filled.Menu, "Chats", tint = Palette.TextSecondary)
-                        }
-                    },
                     actions = {
-                        IconButton(onClick = { viewModel.newSession() }) {
+                        IconButton(onClick = { viewModel.newChat() }) {
                             Icon(Icons.Filled.Add, "New chat", tint = Palette.TextSecondary)
+                        }
+                        IconButton(onClick = onOpenSettings) {
+                            Icon(Icons.Outlined.Settings, "Settings", tint = Palette.TextSecondary)
                         }
                     },
                     colors = TopAppBarDefaults.topAppBarColors(containerColor = Palette.White),
@@ -180,7 +140,6 @@ fun ChatScreen(
                 voiceAvailable = voiceAvailable,
             )
         }
-    }
     }
 }
 

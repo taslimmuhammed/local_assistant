@@ -4,19 +4,14 @@ import android.util.Log
 import com.google.ai.edge.litertlm.Content
 import com.google.ai.edge.litertlm.Conversation
 import com.google.ai.edge.litertlm.Message
-import com.local.assistant.data.AssistantDatabase
 import com.local.assistant.data.ChatMessage
 import com.local.assistant.data.Speaker
-import com.local.assistant.data.SessionSummary
-import com.local.assistant.data.Summary
 import com.local.assistant.llm.LlmEngine
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -44,6 +39,10 @@ sealed interface TurnEvent {
 /**
  * Owns the live conversation and keeps it from ever running out of context.
  *
+ * Nothing here is persisted. The transcript and the running summary live in this
+ * object for as long as the process does and are gone afterwards, which is why
+ * there is no database, no session table and no history.
+ *
  * Three layers stand between the user and a dead conversation:
  *
  *  1. Budgets derived from the calibrated ceiling, so we plan against the window
@@ -59,125 +58,56 @@ sealed interface TurnEvent {
  */
 class ChatController(
     private val engine: LlmEngine,
-    private val db: AssistantDatabase,
     private val promptAssembler: PromptAssembler,
     private val summarizer: Summarizer,
-    private val scope: CoroutineScope,
 ) {
 
     private val mutex = Mutex()
 
     private var conversation: Conversation? = null
-    private var sessionId: Long = 0
     private var budget: ContextBudget = ContextBudget.from(DEFAULT_CEILING)
+
+    /** The live transcript, oldest first. In memory only. */
+    private val transcript = mutableListOf<ChatMessage>()
+    private var runningSummary: String? = null
+    private var nextId = 1L
+    private var compactionCount = 0
 
     private val _contextState = MutableStateFlow(
         ContextState(0, budget.usableCeiling, 0, isCompacting = false)
     )
     val contextState: StateFlow<ContextState> = _contextState.asStateFlow()
 
-    private var compactionCount = 0
-
-    private val _sessions = MutableStateFlow<List<SessionSummary>>(emptyList())
-    val sessions: StateFlow<List<SessionSummary>> = _sessions.asStateFlow()
-
-    private val _activeSessionId = MutableStateFlow(0L)
-    val activeSessionId: StateFlow<Long> = _activeSessionId.asStateFlow()
-
-    /**
-     * Applies the calibrated ceiling and opens a chat for this launch.
-     *
-     * Opening the app starts a fresh chat rather than resuming the last one, which
-     * is what people expect from a chat app. The exception is an unused chat: if the
-     * newest one has no messages, it is reused rather than stacking blank rows in
-     * the history.
-     */
-    suspend fun start(usableCeiling: Int, resumeSessionId: Long? = null) = mutex.withLock {
+    /** Applies the calibrated ceiling and opens an empty chat. */
+    suspend fun start(usableCeiling: Int) = mutex.withLock {
         budget = ContextBudget.from(usableCeiling)
+        resetLocked()
+    }
 
-        sessionId = resumeSessionId
-            ?: db.latestSessionId()?.takeIf { db.isSessionEmpty(it) }
-            ?: db.createSession(System.currentTimeMillis())
+    /** Clears the conversation and starts over. */
+    suspend fun newChat() = mutex.withLock { resetLocked() }
 
+    private fun resetLocked() {
+        transcript.clear()
+        runningSummary = null
         compactionCount = 0
         rebuildConversation()
         publishState()
     }
 
-    /** Starts a new chat. Reuses the current one if nothing has been said in it. */
-    fun startNewSession() {
-        scope.launch {
-            mutex.withLock {
-                if (db.isSessionEmpty(sessionId)) return@withLock
-                sessionId = db.createSession(System.currentTimeMillis())
-                compactionCount = 0
-                rebuildConversation()
-                publishState()
-            }
-            refreshSessions()
-        }
-    }
-
-    /** Reopens an earlier chat, with its summary and recent turns restored. */
-    fun openSession(id: Long) {
-        scope.launch {
-            if (sessionId == id) return@launch
-            mutex.withLock {
-                sessionId = id
-                compactionCount = 0
-                rebuildConversation()
-                publishState()
-            }
-            refreshSessions()
-        }
-    }
-
-    fun deleteSession(id: Long) {
-        scope.launch {
-            mutex.withLock {
-                db.deleteSession(id)
-                if (sessionId == id) {
-                    sessionId = db.createSession(System.currentTimeMillis())
-                    compactionCount = 0
-                    rebuildConversation()
-                    publishState()
-                }
-            }
-            refreshSessions()
-        }
-    }
-
-    fun renameSession(id: Long, title: String) {
-        scope.launch {
-            db.setSessionTitle(id, title)
-            refreshSessions()
-        }
-    }
-
-    fun refreshSessions() {
-        scope.launch { _sessions.value = db.listSessions() }
-    }
-
-    fun currentSessionId(): Long = sessionId
-
-    /**
-     * Sends a turn and streams the reply.
-     *
-     * The user's message is persisted before inference so a crash mid-generation
-     * cannot lose what they typed.
-     */
+    /** Sends a turn and streams the reply. */
     fun send(userText: String): Flow<TurnEvent> = flow {
         val trimmed = userText.trim()
         if (trimmed.isEmpty()) return@flow
 
-        val now = System.currentTimeMillis()
-        // Checked before the insert: this is what decides whether the chat has just
-        // acquired a name and needs to appear in the history.
-        val isFirstTurn = db.isSessionEmpty(sessionId)
-        val userMessageId = db.insertMessage(
-            ChatMessage(sessionId = sessionId, speaker = Speaker.USER, text = trimmed, createdAt = now)
-        )
-        db.touchSession(sessionId, now)
+        val userMessage = mutex.withLock {
+            ChatMessage(
+                id = nextId++,
+                speaker = Speaker.USER,
+                text = trimmed,
+                createdAt = System.currentTimeMillis(),
+            ).also { transcript.add(it) }
+        }
 
         var attempt = 0
         while (true) {
@@ -195,15 +125,15 @@ class ChatController(
                 }
 
                 val full = accumulator.text().trim()
-                val assistantId = db.insertMessage(
+                val reply = mutex.withLock {
                     ChatMessage(
-                        sessionId = sessionId,
+                        id = nextId++,
                         speaker = Speaker.ASSISTANT,
                         text = full,
                         createdAt = System.currentTimeMillis(),
-                    )
-                )
-                emit(TurnEvent.Complete(full, assistantId))
+                    ).also { transcript.add(it) }
+                }
+                emit(TurnEvent.Complete(full, reply.id))
                 break
             } catch (t: Throwable) {
                 val recoverable = LlmEngine.isContextExhausted(t) ||
@@ -221,18 +151,14 @@ class ChatController(
                 _contextState.value = _contextState.value.copy(
                     lastRecoveredAt = System.currentTimeMillis()
                 )
-                // Drop the half-written turn so the retry sees a clean window.
-                compact(force = true, excludeFromId = userMessageId)
+                compact(force = true, excludeId = userMessage.id)
             }
         }
-
-        db.touchSession(sessionId, System.currentTimeMillis())
-        if (isFirstTurn) refreshSessions()
 
         // Compact after the turn rather than before it, so the reply streams without
         // a stall and the next turn starts with room already made.
         if (currentTokens() >= budget.compactionWatermark) {
-            val summary = compact(force = false, excludeFromId = null)
+            val summary = compact(force = false, excludeId = null)
             if (summary != null) emit(TurnEvent.Compacted(summary.length))
         }
         publishState()
@@ -248,38 +174,35 @@ class ChatController(
      * the middle of a conversation, so we close it and seed a fresh one with the
      * summary in the system prompt and the recent turns as `initialMessages`.
      */
-    private suspend fun compact(force: Boolean, excludeFromId: Long?): String? {
+    private suspend fun compact(force: Boolean, excludeId: Long?): String? {
         _contextState.value = _contextState.value.copy(isCompacting = true)
         try {
-            val recent = db.recentMessages(sessionId, RECENCY_TURNS)
-            val oldestKeptId = recent.firstOrNull()?.id ?: Long.MAX_VALUE
-            val toFold = db.unsummarizedBefore(sessionId, oldestKeptId)
-                .filter { excludeFromId == null || it.id != excludeFromId }
+            val toFold = mutex.withLock {
+                val keepFrom = (transcript.size - RECENCY_TURNS).coerceAtLeast(0)
+                transcript.take(keepFrom).filter { !it.summarized && it.id != excludeId }
+            }
 
             if (toFold.isEmpty() && !force) return null
 
-            val previous = db.currentSummary(sessionId)
             val merged = summarizer.compact(
-                previousSummary = previous?.text,
+                previousSummary = runningSummary,
                 turns = toFold,
                 charBudget = budget.summaryChars,
             )
 
-            if (merged != null && toFold.isNotEmpty()) {
-                db.replaceSummary(
-                    Summary(
-                        sessionId = sessionId,
-                        text = merged,
-                        firstMessageId = previous?.firstMessageId ?: toFold.first().id,
-                        lastMessageId = toFold.last().id,
-                        createdAt = System.currentTimeMillis(),
-                    )
-                )
-                db.markSummarized(toFold.map { it.id })
-                compactionCount++
+            mutex.withLock {
+                if (merged != null && toFold.isNotEmpty()) {
+                    runningSummary = merged
+                    val folded = toFold.mapTo(mutableSetOf()) { it.id }
+                    for (i in transcript.indices) {
+                        if (transcript[i].id in folded) {
+                            transcript[i] = transcript[i].copy(summarized = true)
+                        }
+                    }
+                    compactionCount++
+                }
+                rebuildConversation(excludeId)
             }
-
-            mutex.withLock { rebuildConversation(excludeMessageId = excludeFromId) }
             return merged
         } catch (t: Throwable) {
             Log.e(TAG, "Compaction failed", t)
@@ -294,20 +217,19 @@ class ChatController(
      * Closes the live conversation and builds a new one from the running summary
      * and the recency window.
      */
-    private fun rebuildConversation(excludeMessageId: Long? = null) {
+    private fun rebuildConversation(excludeId: Long? = null) {
         runCatching { conversation?.close() }
         conversation = null
 
         if (!engine.isReady) return
 
-        val summary = db.currentSummary(sessionId)?.text
-        val system = promptAssembler.build(summary)
+        val system = promptAssembler.build(runningSummary)
 
-        // On a retry the user's turn is already persisted but has not been answered.
-        // Seeding it here as well as resending it would show the model the same
-        // message twice.
-        val seed = db.recentMessages(sessionId, RECENCY_TURNS)
-            .filter { it.id != excludeMessageId }
+        // On a retry the user's turn is already in the transcript but has not been
+        // answered. Seeding it here as well as resending it would show the model the
+        // same message twice.
+        val seed = transcript.takeLast(RECENCY_TURNS)
+            .filter { it.id != excludeId }
             .map { m ->
                 if (m.speaker == Speaker.USER) Message.user(m.text) else Message.model(m.text)
             }
@@ -332,7 +254,6 @@ class ChatController(
     }
 
     private fun publishState() {
-        _activeSessionId.value = sessionId
         _contextState.value = ContextState(
             usedTokens = currentTokens(),
             usableCeiling = budget.usableCeiling,
@@ -345,6 +266,8 @@ class ChatController(
     fun close() {
         runCatching { conversation?.close() }
         conversation = null
+        transcript.clear()
+        runningSummary = null
     }
 
     companion object {
@@ -353,7 +276,6 @@ class ChatController(
 
         /** Turns always kept verbatim. Twelve is roughly six exchanges. */
         private const val RECENCY_TURNS = 12
-
     }
 }
 
