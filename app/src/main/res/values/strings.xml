@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Local Assistant</string>
+    <string name="download_channel_name">Model download</string>
+    <string name="download_channel_desc">Progress for the on-device model download</string>
+</resources>

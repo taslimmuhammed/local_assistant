@@ -1,0 +1,14 @@
+<resources>
+    <!--
+      Deliberately a Light theme with no -night variant. The app commits to the
+      white look; a dark mode would be an explicit user setting later, not a
+      system-following default.
+    -->
+    <style name="Theme.LocalAssistant" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@android:color/white</item>
+        <item name="android:navigationBarColor">@android:color/white</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowBackground">@android:color/white</item>
+    </style>
+</resources>
